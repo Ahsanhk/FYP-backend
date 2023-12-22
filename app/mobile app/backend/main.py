@@ -342,6 +342,34 @@ async def update_active_status(cardNumber: str):
         raise HTTPException(status_code=404, detail="Card Number not found")
 
 
+@app.post("/set-default-card")
+async def set_default_card(user_id: str, cardNumber: str, ):
+    try:
+        print(f"Received user_id: {user_id}, card_number: {cardNumber}")
+
+        result = collection_cards.update_many(
+            {"userId": user_id},
+            {"$set": {"default": False}}
+        )
+
+        print(f"Updated {result.modified_count} documents to default=False")
+
+        result = collection_cards.find_one_and_update(
+            {"userId": user_id, "cardNumber": cardNumber},
+            {"$set": {"default": True}}
+        )
+
+        if not result:
+            raise HTTPException(
+                status_code=404, detail="Card not found for the user")
+
+        return {"message": f"Default card updated for user: {user_id}"}
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Internal Server Error: {str(e)}")
+
+
 class Transaction(BaseModel):
     time: datetime
     amount: int
