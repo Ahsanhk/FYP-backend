@@ -1,4 +1,6 @@
 # from fastapi_mail import FastMail, MessageSchema, ConnectionConfig
+from bson import json_util
+from bson import ObjectId
 from typing import Optional
 from typing import List
 from pydantic import EmailStr, BaseModel
@@ -277,25 +279,67 @@ async def store_card_details(card_details: CardBase):
         return {"message": "Failed to store card details"}
 
 
-@app.post("/update-active-status/{username}")
-async def update_active_status(username: str):
-    user_data = collection_cards.find_one({"username": username})
+@app.post("/update-active-status/{cardNumber}")
+async def update_active_status(cardNumber: str):
+    user_data = collection_cards.find_one({"cardNumber": cardNumber})
     if user_data:
         current_status = user_data.get("activeStatus")
         updated_status = not current_status
 
         result = collection_cards.update_one(
-            {"username": username},
+            {"cardNumber": cardNumber},
             {"$set": {"activeStatus": updated_status}}
         )
 
         if result.modified_count > 0:
-            return {"message": f"Active status updated to {updated_status} for {username}"}
+            return {"message": f"Active status updated to {updated_status} for {cardNumber}"}
         else:
             raise HTTPException(
                 status_code=500, detail="Failed to update active status")
     else:
-        raise HTTPException(status_code=404, detail="Username not found")
+        raise HTTPException(status_code=404, detail="Card Number not found")
+
+
+@app.post("/update-online-Status/{cardNumber}")
+async def update_active_status(cardNumber: str):
+    user_data = collection_cards.find_one({"cardNumber": cardNumber})
+    if user_data:
+        current_status = user_data.get("onlineStatus")
+        updated_status = not current_status
+
+        result = collection_cards.update_one(
+            {"cardNumber": cardNumber},
+            {"$set": {"onlineStatus": updated_status}}
+        )
+
+        if result.modified_count > 0:
+            return {"message": f"Online Status updated to {updated_status} for {cardNumber}"}
+        else:
+            raise HTTPException(
+                status_code=500, detail="Failed to update online status")
+    else:
+        raise HTTPException(status_code=404, detail="Card Number not found")
+
+
+@app.post("/update-international-status/{cardNumber}")
+async def update_active_status(cardNumber: str):
+    user_data = collection_cards.find_one({"cardNumber": cardNumber})
+    if user_data:
+        current_status = user_data.get("intStatus")
+        updated_status = not current_status
+
+        result = collection_cards.update_one(
+            {"cardNumber": cardNumber},
+            {"$set": {"intStatus": updated_status}}
+        )
+
+        if result.modified_count > 0:
+            return {"message": f"International status updated to {updated_status} for {cardNumber}"}
+        else:
+            raise HTTPException(
+                status_code=500, detail="Failed to update active status")
+    else:
+        raise HTTPException(status_code=404, detail="Card Number not found")
 
 
 class Transaction(BaseModel):
@@ -403,6 +447,47 @@ async def delete_face_name(data: FaceNameDelete):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class CardInfo(BaseModel):
+    userId: str
+    bankName: str
+    balance: float
+    cardNumber: str
+    issueDate: str
+    pincode: str
+    activeStatus: bool = True
+    onlineStatus: bool = True
+    intStatus: bool = True
+    default: bool = False
+
+
+@app.post("/store-card-info")
+async def store_card_info(card_info: CardInfo):
+    try:
+        card_data = card_info.dict()
+
+        collection_cards.insert_one(card_data)
+
+        return {"message": "Card information stored successfully"}
+
+    except Exception as e:
+        return {"error": f"Failed to store card information: {str(e)}"}
+
+
+@app.get("/get-cards/{user_id}")
+async def get_cards_by_user_id(user_id: str):
+    try:
+        cards = collection_cards.find({"userId": user_id})
+        card_list = [json.loads(json_util.dumps(card)) for card in cards]
+
+        if not card_list:
+            return {"message": "No cards found for this user"}
+
+        return card_list
+
+    except Exception as e:
+        return {"error": f"Failed to fetch cards: {str(e)}"}
 
 
 # SMTP_SERVER = 'smtp.gmail.com'
