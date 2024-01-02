@@ -109,33 +109,9 @@ async def register_user(user_data: userData):
 
 
 class UploadUserFaceRequest(BaseModel):
-    username: str
+    userId: str
     imageUrl: str
     faceName: str
-
-
-@app.post("/upload-user-face")
-async def upload_user_face(request_data: UploadUserFaceRequest):
-    try:
-        username = request_data.username
-        imageUrl = request_data.imageUrl
-        faceName = request_data.faceName
-
-        user_image_doc = collection_images.find_one({"username": username})
-
-        if user_image_doc:
-            new_face_data = {"faceName": faceName, "imageUrl": imageUrl}
-            collection_images.update_one(
-                {"_id": user_image_doc["_id"]},
-                {"$push": {"user_faces": new_face_data}}
-            )
-
-            return {"message": f"Image URL added to user_faces for {username}"}
-        else:
-            return {"message": "Username not found"}
-    except Exception as e:
-        print(f"Exception uploading user face: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/upload-profile-pic")
@@ -167,6 +143,33 @@ async def get_user_data(username: str):
         return user_data
     else:
         return {"message": "User not found"}
+
+
+class UploadUserFaceRequest(BaseModel):
+    user_id: str
+    imageUrl: str
+    faceName: str
+
+
+@app.post("/upload-user-face")
+async def upload_user_face(request_data: UploadUserFaceRequest):
+    try:
+        userId = request_data.user_id
+        imageUrl = request_data.imageUrl
+        faceName = request_data.faceName
+
+        face_data = {
+            "userId": userId,
+            "imageUrl": imageUrl,
+            "faceName": faceName
+        }
+
+        collection_images.insert_one(face_data)
+
+        return {"message": f"Image URL added for {userId}"}
+    except Exception as e:
+        print(f"Exception uploading user face: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/get-user-images/{username}")
@@ -245,38 +248,6 @@ def generate_otp_endpoint(mobileNumber: otpData):
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Failed to send OTP: {str(e)}")
-
-
-class CardBase(BaseModel):
-    username: str
-    bankName: str
-    cardNumber: str
-    updatedIssueDate: str
-    activeStatus: bool
-
-
-@app.post("/store-card-details")
-async def store_card_details(card_details: CardBase):
-
-    if collection_cards.find_one({"username": card_details.username}):
-        result = collection_cards.update_one(
-            {"username": card_details.username},
-            {"$set": card_details.dict(exclude={"username"})}
-        )
-        if result.modified_count > 0:
-            return {"message": "Card details updated successfully"}
-        else:
-            raise HTTPException(
-                status_code=500, detail="Failed to update card details")
-
-    card_document = card_details.dict()
-
-    result = collection_cards.insert_one(card_document)
-
-    if result.inserted_id:
-        return {"message": "Card details stored successfully", "card_id": str(result.inserted_id)}
-    else:
-        return {"message": "Failed to store card details"}
 
 
 @app.post("/update-active-status/{cardNumber}")
@@ -414,31 +385,35 @@ async def get_transactions_in_date_range(username: str, start_date: str, end_dat
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/get-user-faces/{user_id}")
+async def get_user_images(user_id: str):
+    user_images_data = list(collection_images.find({"userId": user_id}))
+
+    if user_images_data:
+        for image_data in user_images_data:
+            image_data['_id'] = str(image_data['_id'])
+        return user_images_data
+    else:
+        return {"message": "User images not found"}
+
+
 class updatedData(BaseModel):
-    faceName: str
+    face_id: str
     updatedName: str
-    username: str
 
 
 @app.post("/update-face-name")
 async def update_face_name(data: updatedData):
     try:
-        query = {"username": data.username}
+        query = {"_id": ObjectId(data.face_id)}
         user_data = collection_images.find_one(query)
 
         if not user_data:
-            raise HTTPException(status_code=404, detail="Username not found")
-
-        user_faces = user_data.get("user_faces", [])
-
-        for face in user_faces:
-            if face.get("faceName") == data.faceName:
-                face["faceName"] = data.updatedName
-                break
+            raise HTTPException(status_code=404, detail="Face ID not found")
 
         collection_images.update_one(
-            {"username": data.username},
-            {"$set": {"user_faces": user_faces}}
+            {"_id": ObjectId(data.face_id)},
+            {"$set": {"faceName": data.updatedName}}
         )
 
         return {"message": "Face name updated successfully"}
@@ -447,53 +422,56 @@ async def update_face_name(data: updatedData):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-class FaceNameDelete(BaseModel):
-    username: str
-    faceName: str
+class FaceDelete(BaseModel):
+    face_id: str
 
 
 @app.post("/delete-face-name")
-async def delete_face_name(data: FaceNameDelete):
+async def delete_face(data: FaceDelete):
     try:
-        query = {"username": data.username}
-        user_data = collection_images.find_one(query)
+        query = {"_id": ObjectId(data.face_id)}
+        face_data = collection_images.find_one(query)
 
-        if not user_data:
-            raise HTTPException(status_code=404, detail="Username not found")
+        if not face_data:
+            raise HTTPException(status_code=404, detail="Face ID not found")
 
-        user_faces = user_data.get("user_faces", [])
+        collection_images.delete_one(query)
 
-        filtered_faces = [face for face in user_faces if face.get(
-            "faceName") != data.faceName]
-
-        collection_images.update_one(
-            {"username": data.username},
-            {"$set": {"user_faces": filtered_faces}}
-        )
-
-        return {"message": f"Objects with faceName '{data.faceName}' deleted successfully"}
+        return {"message": f"Face with ID '{data.face_id}' deleted successfully"}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-class CardInfo(BaseModel):
-    userId: str
+class CardData(BaseModel):
     bankName: str
-    balance: float
     cardNumber: str
-    issueDate: str
+    issuedate: str
     pincode: str
-    activeStatus: bool = True
-    onlineStatus: bool = True
-    intStatus: bool = True
-    default: bool = False
+    userId: str
 
 
 @app.post("/store-card-info")
-async def store_card_info(card_info: CardInfo):
+async def store_card_info(card_info: CardData):
     try:
+        print("card info: ", card_info)
+        existing_card_count = collection_cards.count_documents(
+            {"userId": card_info.userId})
+        is_default = existing_card_count == 0
+
+        balance = round(random.uniform(10000, 1000000), 2)
+
         card_data = card_info.dict()
+        card_data.update(
+            {
+                "balance": balance,
+                "activeStatus": True,
+                "onlineStatus": True,
+                "intStatus": True,
+                "default": is_default,
+                "assignedFaces": []
+            }
+        )
 
         collection_cards.insert_one(card_data)
 
@@ -516,6 +494,22 @@ async def get_cards_by_user_id(user_id: str):
 
     except Exception as e:
         return {"error": f"Failed to fetch cards: {str(e)}"}
+
+
+@app.delete("/delete-card/{card_id}")
+async def delete_card(card_id: str):
+    try:
+        query = {"_id": ObjectId(card_id)}
+        card_data = collection_cards.find_one(query)
+
+        if not card_data:
+            raise HTTPException(status_code=404, detail="Card ID not found")
+
+        collection_cards.delete_one(query)
+
+        return {"message": f"Card with ID '{card_id}' deleted successfully"}
+    except errors.PyMongoError as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # SMTP_SERVER = 'smtp.gmail.com'

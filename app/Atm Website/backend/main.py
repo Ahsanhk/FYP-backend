@@ -135,6 +135,10 @@
 #     return [{"item_id": 1, "owner": current_user}]
 
 
+import threading
+import mediapipe as mp
+from typing import Optional
+import asyncio
 from dateutil import parser
 from dateutil import parser as date_parser
 from typing import List
@@ -198,10 +202,11 @@ db = client["test"]
 collection_user = db["user"]
 collection_transactions = db["user_transactions"]
 collection_images = db["user_images"]
+collection_dump = db["dump_transactions"]
 
 predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
 
-# Load YOLO
+# Loading YOLO
 net = cv2.dnn.readNet("yolo/yolov3.weights", "yolo/yolov3.cfg")
 classes = []
 with open("coco.names", "r") as f:
@@ -210,8 +215,11 @@ with open("coco.names", "r") as f:
 layer_names = net.getLayerNames()
 output_layers = [layer_names[i - 1] for i in net.getUnconnectedOutLayers()]
 
+emotion_detection_task = None
 
 # check username
+
+
 @app.get("/get_user/{username}")
 async def get_user_by_username_route(username: str):
     user_data = get_user_by_username(username)
@@ -244,7 +252,7 @@ async def validate_pincode_route(username: str, pincode: str):
 
 # global videoURL
 
-stop_processing = False
+# stop_processing = False
 cloudinary_url = None
 
 
@@ -252,33 +260,40 @@ class TransactionData(BaseModel):
     # time: str
     amount: float
     username: str
-    videoURL: str
+    videoURL: Optional[str] = None
     status: bool = False
 
 
 @app.post("/upload-transaction-data")
 async def upload_transaction_data(transaction_data: TransactionData):
-    global stop_processing
-    stop_processing = True
+    global emotion_detection_task
+    # stop_processing = True
     # global cloudinary_url
+    # if emotion_detection_task and not emotion_detection_task.done():
+    #     emotion_detection_task.cancel()
+    #     emotion_detection_task = None
+    #     return {"message": "Emotion detection stopped."}
+    # else:
+    #     return {"message": "No emotion detection running."}
 
     try:
-        user_transaction_doc = collection_transactions.find_one(
+        user_transaction_doc = collection_dump.find_one(
             {"username": transaction_data.username})
 
         if user_transaction_doc:
             new_transaction = {
                 "time": datetime.now(),
-                "amount": transaction_data.amount,
-                "videoURL": transaction_data.videoURL,
+                "amount": {},
+                "videoURL": '',
                 "status": True
             }
 
             user_transaction_doc["transaction"].append(new_transaction)
 
-            collection_transactions.update_one(
-                {"_id": user_transaction_doc["_id"]},
-                {"$set": {"transaction": user_transaction_doc["transaction"]}}
+            collection_dump.update_one(
+                {"username": transaction_data.username},
+                {"$set": {
+                    "transaction": user_transaction_doc["transaction"], "running": False}}
             )
 
             return {"message": "Transaction data uploaded successfully"}
@@ -492,12 +507,20 @@ async def check_face_cover_route():
     return {"face covered/multiple faces": is_face_covered}
 
 
-async def emotion_detection():
+async def emotion_detection(username):
     net = cv2.dnn.readNet("yolo/yolov3.weights", "yolo/yolov3.cfg")
     layer_names = net.getUnconnectedOutLayersNames()
 
+    new_instance = {
+        'username': username,
+        'running': True,
+        'transaction': [],
+    }
+
+    insert_result = collection_dump.insert_one(new_instance)
+
     global cloudinary_url
-    global stop_processing
+    stop_processing = False
 
     emotion_model = DeepFace.build_model('Emotion')
     cap = cv2.VideoCapture(0)
@@ -512,65 +535,73 @@ async def emotion_detection():
     rec = cv2.VideoWriter('output.avi', fourcc, 20.0, (640, 480))
 
     while not stop_processing:
-        ret, frame = cap.read()
+        result = collection_dump.find_one({'username': username})
+        running_status = result.get('running', False)
+        print(running_status)
 
-        if not ret or frame is None:
-            print("Error: Could not read frame.")
-            break
+        if running_status:
+            ret, frame = cap.read()
 
-        blob = cv2.dnn.blobFromImage(
-            frame, scalefactor=1/255.0, size=(416, 416), swapRB=True, crop=False)
-        net.setInput(blob)
-        outs = net.forward(layer_names)
+            if not ret or frame is None:
+                print("Error: Could not read frame.")
+                break
 
-        class_ids = []
-        confidences = []
-        boxes = []
+            blob = cv2.dnn.blobFromImage(
+                frame, scalefactor=1/255.0, size=(416, 416), swapRB=True, crop=False)
+            net.setInput(blob)
+            outs = net.forward(layer_names)
 
-        for out in outs:
-            for detection in out:
-                scores = detection[5:]
-                class_id = np.argmax(scores)
-                confidence = scores[class_id]
-                if confidence > 0.5:
-                    center_x = int(detection[0] * frame.shape[1])
-                    center_y = int(detection[1] * frame.shape[0])
-                    w = int(detection[2] * frame.shape[1])
-                    h = int(detection[3] * frame.shape[0])
-                    x = center_x - w // 2
-                    y = center_y - h // 2
-                    class_ids.append(class_id)
-                    confidences.append(float(confidence))
-                    boxes.append([x, y, w, h])
-        # if len(boxes) > 1:
-        #     return ("multiple faces" : True)
-        if len(boxes) > 0:
-            x, y, w, h = boxes[0]
-            face = frame[y:y+h, x:x+w]
+            class_ids = []
+            confidences = []
+            boxes = []
 
-            if face.size > 0:
-                emotion_results = DeepFace.analyze(
-                    face, actions=['emotion'], enforce_detection=False)
+            for out in outs:
+                for detection in out:
+                    scores = detection[5:]
+                    class_id = np.argmax(scores)
+                    confidence = scores[class_id]
+                    if confidence > 0.5:
+                        center_x = int(detection[0] * frame.shape[1])
+                        center_y = int(detection[1] * frame.shape[0])
+                        w = int(detection[2] * frame.shape[1])
+                        h = int(detection[3] * frame.shape[0])
+                        x = center_x - w // 2
+                        y = center_y - h // 2
+                        class_ids.append(class_id)
+                        confidences.append(float(confidence))
+                        boxes.append([x, y, w, h])
+            # if len(boxes) > 1:
+            #     return ("multiple faces" : True)
+            if len(boxes) > 0:
+                x, y, w, h = boxes[0]
+                face = frame[y:y+h, x:x+w]
 
-                if emotion_results and 'dominant_emotion' in emotion_results[0]:
-                    dominant_emotion = emotion_results[0]['dominant_emotion']
-                    emotion_accuracy = emotion_results[0]['emotion'][dominant_emotion]
-                    cv2.putText(frame, f"Emotion: {dominant_emotion} ({emotion_accuracy:.2f})",
-                                (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+                if face.size > 0:
+                    emotion_results = DeepFace.analyze(
+                        face, actions=['emotion'], enforce_detection=False)
 
-                    if emotion_accuracy > 0.6 and dominant_emotion.lower() == 'fear':
-                        stop_processing = True
-                        print("Detected 'fear'. Stopping further detection.")
-                        # return True
+                    if emotion_results and 'dominant_emotion' in emotion_results[0]:
+                        dominant_emotion = emotion_results[0]['dominant_emotion']
+                        emotion_accuracy = emotion_results[0]['emotion'][dominant_emotion]
+                        cv2.putText(frame, f"Emotion: {dominant_emotion} ({emotion_accuracy:.2f})",
+                                    (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
 
-            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                        if emotion_accuracy > 0.6 and dominant_emotion.lower() == 'fear':
+                            stop_processing = True
+                            print("Detected 'fear'. Stopping further detection.")
+                            # return True
 
-        rec.write(frame)
+                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-        if stop_processing:
-            break
+            rec.write(frame)
 
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+            if stop_processing:
+                break
+
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+        else:
+            print('stopping criteria met, breaking...')
             break
 
     cap.release()
@@ -583,23 +614,72 @@ async def emotion_detection():
     cloudinary_url = upload_result['secure_url']
     print("Uploaded video URL:", cloudinary_url)
 
-    if stop_processing:
+    if running_status:
+        user_transaction_doc = collection_transactions.find_one(
+            {"username": username})
+        if user_transaction_doc:
+            new_transaction = {
+                "time": datetime.now(),
+                "amount": 'N/A',
+                "videoURL": cloudinary_url,
+                "status": False
+            }
+            collection_transactions.update_one(
+                {"_id": user_transaction_doc["_id"]},
+                {"$push": {"transaction": new_transaction}}
+            )
         return True
+
     else:
-        return False
+        print('hi')
+        user_dump = collection_dump.find_one({"username": username})
+        if user_dump:
+            first_transaction = user_dump.get("transaction", [])[
+                0] if user_dump.get("transaction") else None
+            print(first_transaction)
+            if first_transaction:
+                new_transaction = {
+                    "time": first_transaction.time,
+                    "amount": first_transaction.amount,
+                    "videoURL": cloudinary_url,
+                    "status": True
+                }
+
+                try:
+                    collection_transactions.update_one(
+                        {"username": username},
+                        {"$push": {"transaction": new_transaction}}
+                    )
+                    print("Transaction appended successfully.")
+                except Exception as e:
+                    print(f"Error appending transaction: {str(e)}")
+            else:
+                print("No transaction found in collection_dump.")
+        else:
+            print("Username not found in collection_dump.")
+
+    # if stop_processing:
+    #     return True
+    # else:
+    #     return False
 
 
-@app.get("/emotion-detection")
-async def video_feed():
-    global stop_processing
-    stop_processing = False
-    # event = asyncio.Event()
-    emotion_result = await emotion_detection()
+@app.get("/emotion-detection/{username}")
+async def video_feed(username: str):
+    global emotion_detection_task
+    # print('emotion detection task: ', emotion_detection_task)
+    event = asyncio.Event()
+    emotion_result = await emotion_detection(username)
     print('emotion result: ', emotion_result)
     if emotion_result:
         return True
     else:
         return False
+    # if emotion_detection_task is None or emotion_detection_task.done():
+    #     emotion_detection_task = asyncio.create_task(emotion_detection())
+    #     return {"message": "Emotion detection started."}
+    # else:
+    #     return {"message": "Emotion detection already running."}
 
 
 def load_image_from_url(url):
@@ -694,6 +774,67 @@ async def face_detection(username):
 async def face_detection_route(request: Request, username: str):
     isFaceRecognized = await face_detection(username)
     return JSONResponse(content=isFaceRecognized)
+
+lock = threading.Lock()
+frame = None
+hands = mp.solutions.hands.Hands()
+
+
+def detect_stop_sign():
+    global frame
+
+    try:
+        if frame is None:
+            return {"message": "Frame is not available."}
+
+        with lock:
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            # ... (rest of the detection logic)
+            # Example: results = hands.process(rgb_frame)
+            # ...
+
+            # Display the processed frame using cv2.imshow()
+            cv2.imshow('Processed Frame', processed_frame)
+            cv2.waitKey(1)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+# app = FastAPI()
+
+
+@app.get("/detect_stop_sign")
+async def detect_stop_sign_endpoint():
+    global frame
+
+    cap = cv2.VideoCapture(0)
+
+    if not cap.isOpened():
+        raise HTTPException(
+            status_code=500, detail="Could not open video capture.")
+
+    def read_frames():
+        global frame
+        while True:
+            ret, current_frame = cap.read()
+            if not ret:
+                raise HTTPException(
+                    status_code=500, detail="Error reading frame from video capture.")
+
+            with lock:
+                frame = current_frame
+                cv2.waitKey(1)
+
+    frame_thread = threading.Thread(target=read_frames, daemon=True)
+    frame_thread.start()
+
+    try:
+        with lock:
+            result = detect_stop_sign()
+            return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 
 # def draw_bounding_boxes_cover(frame, faces):
