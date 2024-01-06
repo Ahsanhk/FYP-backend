@@ -512,6 +512,62 @@ async def delete_card(card_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class AssignedFace(BaseModel):
+    faceId: str
+
+
+class UpdateCardFacesRequest(BaseModel):
+    card_id: str
+    selectedFaces: List[AssignedFace]
+
+
+@app.post("/update-card-faces")
+async def update_card_faces(req: UpdateCardFacesRequest):
+    try:
+        card_id = req.card_id
+        assigned_faces = req.selectedFaces
+
+        card = collection_cards.find_one({"_id": ObjectId(card_id)})
+
+        if card is None:
+            raise HTTPException(status_code=404, detail="Card ID not found")
+
+        updated_faces = [
+            {"face_id": face.faceId}
+            for face in assigned_faces
+        ]
+
+        collection_cards.update_one(
+            {"_id": ObjectId(card_id)},
+            {"$set": {"assignedFaces": updated_faces}}
+        )
+
+        return {"message": f"Assigned faces updated for card {card_id}"}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class AssignedFacesRequest(BaseModel):
+    assignedFaces: List[dict]
+
+
+@app.post("/extract-face-names")
+async def extract_face_names(request: AssignedFacesRequest):
+    try:
+        assigned_faces = request.assignedFaces
+        face_ids = [ObjectId(face["face_id"]) for face in assigned_faces]
+
+        matching_images = collection_images.find({"_id": {"$in": face_ids}})
+        face_names = list(set([img["faceName"]
+                          for img in matching_images if "faceName" in img]))
+
+        return {"faceNames": face_names}
+
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # SMTP_SERVER = 'smtp.gmail.com'
 # SMTP_PORT = 587
 # SENDER_EMAIL = 'regit973@gmail.com'
