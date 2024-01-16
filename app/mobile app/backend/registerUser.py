@@ -2,6 +2,7 @@ from fastapi import HTTPException, Body
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel
 from pymongo import MongoClient
+import bcrypt
 
 
 class UserRegistration(BaseModel):
@@ -10,7 +11,6 @@ class UserRegistration(BaseModel):
     fullName: str
     mobileNumber: str
     password: str
-    pincode: str
     username: str
 
 
@@ -21,9 +21,15 @@ collection = db["user"]
 
 async def register_user(user_data: UserRegistration):
     try:
-        print("Storing user data in MongoDB:", user_data.dict())
-        result = collection.insert_one(user_data.dict())
+        hashed_password_bytes = bcrypt.hashpw(
+            user_data.password.encode(), bcrypt.gensalt())
+        hashed_password_str = hashed_password_bytes.decode('utf-8')
+        user_data_dict = user_data.dict()
+        user_data_dict["password"] = hashed_password_str
+
+        result = collection.insert_one(user_data_dict)
         user_id = str(result.inserted_id)
+
         return {"message": "User registered successfully", "user_id": user_id}
     except Exception as e:
         print(f"Exception register user: {str(e)}")

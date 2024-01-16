@@ -1,140 +1,13 @@
-# from fastapi import Depends, FastAPI, HTTPException, status
-# from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-# from pydantic import BaseModel
-# from datetime import datetime, timedelta
-# from jose import JWTError, jwt
-# from passlib.context import CryptContext
-# import motor.motor_asyncio
-
-# SECRET_KEY = "2261ad8242de1aefb80712940f669a5ff85ac2482e6ed6b9e31b122b589f8c21"
-# ALGORITHM = "HS256"
-# ACCESS_TOKEN_EXPIRE_MINUTES = 30
-
-# # client = motor.motor_asyncio.AsyncIOMotorClient("mongodb://localhost:27017")
-# # database = client["test"]
-# # collection = database["user"]
-
-# db = {
-#     "tim": {
-#         "username": "tim",
-#         "full_name": "Tim Ruscica",
-#         "email": "tim@gmail.com",
-#         "hashed_password": "$2b$12$HxWHkvMuL7WrZad6lcCfluNFj1/Zp63lvP5aUrKlSTYtoFzPXHOtu",
-#         "disabled": False
-#     }
-# }
-
-
-# class Token(BaseModel):
-#     access_token: str
-#     token_type: str
-
-
-# class TokenData(BaseModel):
-#     username: str or None = None
-
-
-# class User(BaseModel):
-#     username: str
-#     email: str or None = None
-#     full_name: str or None = None
-#     disabled: bool or None = None
-
-
-# class UserInDB(User):
-#     hashed_password: str
-
-
-# pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-# oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
-
-# app = FastAPI()
-
-
-# def verify_password(plain_password, hashed_password):
-#     return pwd_context.verify(plain_password, hashed_password)
-
-
-# def get_password_hash(password):
-#     return pwd_context.hash(password)
-
-
-# async def get_user(username: str):
-#     user = await collection.find_one({"username": username})
-#     # print({"username": username})
-#     print("user in get_user: ", user)
-#     return user
-
-
-# async def authenticate_user(username: str, password: str):
-#     user = await get_user(username)
-#     print('user in authentication', user)
-#     if user or not verify_password(password, user["hashed_password"]):
-#         return False
-#     return user
-
-
-# async def create_access_token(data: dict, expires_delta: timedelta or None = None):
-#     to_encode = data.copy()
-#     if expires_delta:
-#         expire = datetime.utcnow() + expires_delta
-#     else:
-#         expire = datetime.utcnow() + timedelta(minutes=15)
-
-#     to_encode.update({"exp": expire})
-#     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-#     return encoded_jwt
-
-
-# async def get_current_user(token: str = Depends(oauth2_scheme)):
-#     credential_exception = HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
-#                                          detail="Could not validate credentials", headers={"WWW-Authenticate": "Bearer"})
-#     try:
-#         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-#         username: str = payload.get("sub")
-#         if username is None:
-#             raise credential_exception
-
-#         token_data = TokenData(username=username)
-#     except JWTError:
-#         raise credential_exception
-
-#     user = get_user(username=token_data.username)
-#     if user is None:
-#         raise credential_exception
-
-#     return user
-
-
-# async def get_current_active_user(current_user: UserInDB = Depends(get_current_user)):
-#     if current_user.disabled:
-#         raise HTTPException(status_code=400, detail="Inactive user")
-
-#     return current_user
-
-
-# @app.post("/token", response_model=Token)
-# async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
-#     user = await authenticate_user(form_data.username, form_data.password)
-#     if not user:
-#         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
-#                             detail="Incorrect username or password", headers={"WWW-Authenticate": "Bearer"})
-#     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-#     access_token = create_access_token(
-#         data={"sub": user.username}, expires_delta=access_token_expires)
-#     return {"access_token": access_token, "token_type": "bearer"}
-
-
-# @app.get("/users/me/", response_model=User)
-# async def read_users_me(current_user: User = Depends(get_current_active_user)):
-#     return current_user
-
-
-# @app.get("/users/me/items")
-# async def read_own_items(current_user: User = Depends(get_current_active_user)):
-#     return [{"item_id": 1, "owner": current_user}]
-
-
+import bcrypt
+import io
+import pyautogui
+import torch
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.websockets import WebSocketDisconnect
+from fastapi import FastAPI, WebSocket
+from bson import ObjectId
 import threading
 import mediapipe as mp
 from typing import Optional
@@ -202,6 +75,7 @@ db = client["test"]
 collection_user = db["user"]
 collection_transactions = db["user_transactions"]
 collection_images = db["user_images"]
+collection_cards = db["user_cards"]
 collection_dump = db["dump_transactions"]
 
 predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
@@ -217,37 +91,60 @@ output_layers = [layer_names[i - 1] for i in net.getUnconnectedOutLayers()]
 
 emotion_detection_task = None
 
-# check username
+
+@app.get('/get-user/{cardNumber}')
+async def get_user(cardNumber: str):
+    card_exists = bool(collection_cards.find_one(
+        {"cardNumber": cardNumber}))
+
+    return {"exists": card_exists}
 
 
-@app.get("/get_user/{username}")
-async def get_user_by_username_route(username: str):
-    user_data = get_user_by_username(username)
-    # return {"user_data": user_data}
-    if username is None:
-        return {"isAvailable": False}
-    else:
-        return {"isAvailable": True}
+class CardDetails(BaseModel):
+    cardNumber: str
+    pincode: str
+
+
+@app.post('/validate-pincode')
+async def validate_pin(card: CardDetails):
+    card_data = collection_cards.find_one({"cardNumber": card.cardNumber})
+
+    if card_data:
+        hashed_pin = card_data.get("pincode")
+        entered_pin = card.pincode.encode("utf-8")
+
+        if bcrypt.checkpw(entered_pin, hashed_pin.encode("utf-8")):
+            return {"isValid": True, "userId": card_data.get("userId")}
+
+    return {"isValid": False}
+
+
+@app.get("/get-card-details/{card_number}")
+async def get_card_details(card_number: str):
+    card_data = collection_cards.find_one({"cardNumber": card_number})
+
+    if card_data:
+        card_data["_id"] = str(card_data["_id"])
+
+        return card_data
 
 
 # fetch user data
-@app.get("/get-user-data/{username}")
-async def get_user_data(username: str):
-    user_data = collection_user.find_one({"username": username})
-    print(user_data)
-    if user_data:
-        user_data['_id'] = str(user_data['_id'])
-        return user_data
-    else:
-        return {"message": "User not found"}
 
 
-# validate pincode
-@app.get("/validate_pincode")
-async def validate_pincode_route(username: str, pincode: str):
-    is_valid = validate_pincode(username, pincode)
-    print(is_valid)
-    return {"isValid": is_valid}
+@app.get("/get-user-data/{user_id}")
+async def get_user_data(user_id: str):
+    try:
+        user_object_id = ObjectId(user_id)
+        user_data = collection_user.find_one({"_id": user_object_id})
+
+        if user_data:
+            user_data['_id'] = str(user_data['_id'])
+            return user_data
+        else:
+            return {"message": "User not found"}
+    except Exception as e:
+        return {"message": "Invalid user_id format"}
 
 
 # global videoURL
@@ -257,48 +154,27 @@ cloudinary_url = None
 
 
 class TransactionData(BaseModel):
-    # time: str
+    card_id: str
     amount: float
-    username: str
-    videoURL: Optional[str] = None
-    status: bool = False
+    videoUrl: str
+    # status: bool = True
 
 
 @app.post("/upload-transaction-data")
 async def upload_transaction_data(transaction_data: TransactionData):
-    global emotion_detection_task
-    # stop_processing = True
-    # global cloudinary_url
-    # if emotion_detection_task and not emotion_detection_task.done():
-    #     emotion_detection_task.cancel()
-    #     emotion_detection_task = None
-    #     return {"message": "Emotion detection stopped."}
-    # else:
-    #     return {"message": "No emotion detection running."}
 
     try:
-        user_transaction_doc = collection_dump.find_one(
-            {"username": transaction_data.username})
+        new_transaction = {
+            "card_id": transaction_data.card_id,
+            "time": datetime.now(),
+            "amount": transaction_data.amount,
+            "videoURL": transaction_data.videoUrl,
+            "status": True
+        }
 
-        if user_transaction_doc:
-            new_transaction = {
-                "time": datetime.now(),
-                "amount": {},
-                "videoURL": '',
-                "status": True
-            }
+        collection_transactions.insert_one(new_transaction)
 
-            user_transaction_doc["transaction"].append(new_transaction)
-
-            collection_dump.update_one(
-                {"username": transaction_data.username},
-                {"$set": {
-                    "transaction": user_transaction_doc["transaction"], "running": False}}
-            )
-
-            return {"message": "Transaction data uploaded successfully"}
-        else:
-            return {"message": "Username not found"}
+        return {"message": "Transaction data uploaded successfully"}
     except Exception as e:
         print(f"Exception uploading transaction data: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -348,10 +224,8 @@ def draw_bounding_boxes(frame, faces):
 
 
 def check_multiple_faces():
-    # global videoURL
     video = cv2.VideoCapture(0)
-    out = cv2.VideoWriter(
-        'output.avi', cv2.VideoWriter_fourcc(*'XVID'), 20.0, (640, 480))
+
     multiple_faces = False
     stop_detection = False
 
@@ -375,24 +249,8 @@ def check_multiple_faces():
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
     video.release()
-    out.release()
     cv2.destroyAllWindows()
     return False
-
-    compression_command = 'ffmpeg -i output.avi -vcodec libx264 -crf 24 output_compressed.mp4'
-    subprocess.run(compression_command, shell=True)
-
-    cloudinary.config(
-        cloud_name="dlk8tzdu3",
-        api_key="994623638344852",
-        api_secret="YGFyNfSaEavUMv_3MV6xDbOLzsI",
-    )
-
-    upload_result = cloudinary.uploader.upload(
-        "output_compressed.mp4", resource_type='video', folder='user_videos')
-
-    videoURL = upload_result['url']
-    print(videoURL)
 
 
 def check_face_cover():
@@ -507,179 +365,70 @@ async def check_face_cover_route():
     return {"face covered/multiple faces": is_face_covered}
 
 
-async def emotion_detection(username):
+async def check_multiple_faces_with_emotion():
     net = cv2.dnn.readNet("yolo/yolov3.weights", "yolo/yolov3.cfg")
     layer_names = net.getUnconnectedOutLayersNames()
-
-    new_instance = {
-        'username': username,
-        'running': True,
-        'transaction': [],
-    }
-
-    insert_result = collection_dump.insert_one(new_instance)
-
-    global cloudinary_url
-    stop_processing = False
 
     emotion_model = DeepFace.build_model('Emotion')
     cap = cv2.VideoCapture(0)
 
-    cloudinary.config(
-        cloud_name="dlk8tzdu3",
-        api_key="994623638344852",
-        api_secret="YGFyNfSaEavUMv_3MV6xDbOLzsI",
-    )
+    start_time = time.time()
+    processing_time = 2
 
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    rec = cv2.VideoWriter('output.avi', fourcc, 20.0, (640, 480))
+    while (time.time() - start_time) < processing_time:
+        ret, frame = cap.read()
 
-    while not stop_processing:
-        result = collection_dump.find_one({'username': username})
-        running_status = result.get('running', False)
-        print(running_status)
+        if not ret or frame is None:
+            print("Error: Could not read frame.")
+            break
 
-        if running_status:
-            ret, frame = cap.read()
+        faces = detect_multiple_faces(frame)
 
-            if not ret or frame is None:
-                print("Error: Could not read frame.")
-                break
+        if len(faces) == 0:
+            print("No faces detected.")
+            return {"message": "No faces detected.", "shouldStop": True}
+        elif len(faces) > 1:
+            print("Multiple faces detected.")
+            return {"message": "Multiple faces detected.", "shouldStop": True}
+        elif len(faces) == 1:
+            (x, y, w, h) = faces[0]
+            face = frame[y:y+h, x:x+w]
 
-            blob = cv2.dnn.blobFromImage(
-                frame, scalefactor=1/255.0, size=(416, 416), swapRB=True, crop=False)
-            net.setInput(blob)
-            outs = net.forward(layer_names)
+            if face.size > 0:
+                emotion_results = DeepFace.analyze(
+                    face, actions=['emotion'], enforce_detection=False)
 
-            class_ids = []
-            confidences = []
-            boxes = []
+                if emotion_results and 'dominant_emotion' in emotion_results[0]:
+                    dominant_emotion = emotion_results[0]['dominant_emotion']
+                    emotion_accuracy = emotion_results[0]['emotion'][dominant_emotion]
+                    cv2.putText(frame, f"Emotion: {dominant_emotion} ({emotion_accuracy:.2f})",
+                                (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
 
-            for out in outs:
-                for detection in out:
-                    scores = detection[5:]
-                    class_id = np.argmax(scores)
-                    confidence = scores[class_id]
-                    if confidence > 0.5:
-                        center_x = int(detection[0] * frame.shape[1])
-                        center_y = int(detection[1] * frame.shape[0])
-                        w = int(detection[2] * frame.shape[1])
-                        h = int(detection[3] * frame.shape[0])
-                        x = center_x - w // 2
-                        y = center_y - h // 2
-                        class_ids.append(class_id)
-                        confidences.append(float(confidence))
-                        boxes.append([x, y, w, h])
-            # if len(boxes) > 1:
-            #     return ("multiple faces" : True)
-            if len(boxes) > 0:
-                x, y, w, h = boxes[0]
-                face = frame[y:y+h, x:x+w]
+                    if dominant_emotion.lower() == 'fear' and emotion_accuracy > 0.6:
+                        print(
+                            "Detected 'fear' in a single face. Stopping further detection.")
+                        return {"message": "Detected 'fear' in a single face.", "shouldStop": True}
 
-                if face.size > 0:
-                    emotion_results = DeepFace.analyze(
-                        face, actions=['emotion'], enforce_detection=False)
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-                    if emotion_results and 'dominant_emotion' in emotion_results[0]:
-                        dominant_emotion = emotion_results[0]['dominant_emotion']
-                        emotion_accuracy = emotion_results[0]['emotion'][dominant_emotion]
-                        cv2.putText(frame, f"Emotion: {dominant_emotion} ({emotion_accuracy:.2f})",
-                                    (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
-
-                        if emotion_accuracy > 0.6 and dominant_emotion.lower() == 'fear':
-                            stop_processing = True
-                            print("Detected 'fear'. Stopping further detection.")
-                            # return True
-
-                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-
-            rec.write(frame)
-
-            if stop_processing:
-                break
-
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-        else:
-            print('stopping criteria met, breaking...')
+        if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
     cap.release()
-    rec.release()
     cv2.destroyAllWindows()
 
-    upload_result = cl_upload("output.avi",
-                              resource_type='video', folder='user_videos')
-
-    cloudinary_url = upload_result['secure_url']
-    print("Uploaded video URL:", cloudinary_url)
-
-    if running_status:
-        user_transaction_doc = collection_transactions.find_one(
-            {"username": username})
-        if user_transaction_doc:
-            new_transaction = {
-                "time": datetime.now(),
-                "amount": 'N/A',
-                "videoURL": cloudinary_url,
-                "status": False
-            }
-            collection_transactions.update_one(
-                {"_id": user_transaction_doc["_id"]},
-                {"$push": {"transaction": new_transaction}}
-            )
-        return True
-
-    else:
-        print('hi')
-        user_dump = collection_dump.find_one({"username": username})
-        if user_dump:
-            first_transaction = user_dump.get("transaction", [])[
-                0] if user_dump.get("transaction") else None
-            print(first_transaction)
-            if first_transaction:
-                new_transaction = {
-                    "time": first_transaction.time,
-                    "amount": first_transaction.amount,
-                    "videoURL": cloudinary_url,
-                    "status": True
-                }
-
-                try:
-                    collection_transactions.update_one(
-                        {"username": username},
-                        {"$push": {"transaction": new_transaction}}
-                    )
-                    print("Transaction appended successfully.")
-                except Exception as e:
-                    print(f"Error appending transaction: {str(e)}")
-            else:
-                print("No transaction found in collection_dump.")
-        else:
-            print("Username not found in collection_dump.")
-
-    # if stop_processing:
-    #     return True
-    # else:
-    #     return False
+    return False
 
 
-@app.get("/emotion-detection/{username}")
-async def video_feed(username: str):
-    global emotion_detection_task
-    # print('emotion detection task: ', emotion_detection_task)
+@app.get("/emotion-detection")
+async def video_feed():
     event = asyncio.Event()
-    emotion_result = await emotion_detection(username)
+    emotion_result = await check_multiple_faces_with_emotion()
     print('emotion result: ', emotion_result)
     if emotion_result:
         return True
     else:
         return False
-    # if emotion_detection_task is None or emotion_detection_task.done():
-    #     emotion_detection_task = asyncio.create_task(emotion_detection())
-    #     return {"message": "Emotion detection started."}
-    # else:
-    #     return {"message": "Emotion detection already running."}
 
 
 def load_image_from_url(url):
@@ -688,7 +437,7 @@ def load_image_from_url(url):
     return np.array(img)
 
 
-async def face_detection(username):
+async def face_detection(cardNumber):
     cap = cv2.VideoCapture(0)
 
     cloudinary.config(
@@ -697,16 +446,46 @@ async def face_detection(username):
         api_secret="YGFyNfSaEavUMv_3MV6xDbOLzsI",
     )
 
-    user_data = collection_images.find_one({"username": username})
-    # reference_image_url = "https://res.cloudinary.com/dlk8tzdu3/image/upload/v1700467398/test_preset/qluimaiuagyv31nrvwaj.jpg"
+    # user_data = collection_images.find_one({"username": cardNumber})
 
-    if user_data and "user_faces" in user_data:
-        first_face = user_data["user_faces"][0]
-        reference_image_url = first_face.get("imageUrl")
+    card_instance = collection_cards.find_one({"cardNumber": cardNumber})
 
-        reference_image = load_image_from_url(reference_image_url)
-        reference_encoding = face_recognition.face_encodings(reference_image)[
-            0]
+    if not card_instance:
+        raise HTTPException(
+            status_code=404, detail=f"Card with cardNumber {cardNumber} not found")
+
+    assigned_faces = card_instance.get("assignedFaces", [])
+    print(assigned_faces)
+
+    user_data = []
+
+    for assigned_face in assigned_faces:
+        face_id_str = assigned_face.get("face_id", "")
+
+        try:
+            face_id = ObjectId(face_id_str)
+            face_instance = collection_images.find_one(
+                {"_id": face_id}, {"imageUrl": 1})
+
+            if face_instance and "imageUrl" in face_instance:
+                user_data.append(face_instance["imageUrl"])
+        except Exception as e:
+            print(f"Error converting face_id to ObjectId: {e}")
+
+    if user_data:
+        reference_encodings = []
+
+        for reference_image_url in user_data:
+
+            reference_image = load_image_from_url(reference_image_url)
+            print(reference_image)
+
+            if reference_image is not None:
+                reference_encoding = face_recognition.face_encodings(reference_image)[
+                    0]
+                reference_encodings.append(
+                    (reference_encoding, reference_image_url))
+                print("here")
 
         duration = 2
         start_time = time.time()
@@ -714,27 +493,24 @@ async def face_detection(username):
         while (time.time() - start_time) < duration:
             ret, frame = cap.read()
 
-            timeout = 2
-            face_start_time = time.time()
+            face_locations = face_recognition.face_locations(frame)
 
-            while (time.time() - face_start_time) < timeout:
-                face_locations = face_recognition.face_locations(frame)
+            if face_locations:
+                face_encodings = face_recognition.face_encodings(
+                    frame, face_locations)
 
-                if face_locations:
-                    face_encodings = face_recognition.face_encodings(
-                        frame, face_locations)
-
-                    for face_encoding in face_encodings:
+                for face_encoding in face_encodings:
+                    for reference_encoding, matching_url in reference_encodings:
                         results = face_recognition.compare_faces(
                             [reference_encoding], face_encoding)
 
-                        if results[0]:
+                        if any(results):
                             cap.release()
                             cv2.destroyAllWindows()
-                            print("Match found!")
+                            print(f"Match found with URL: {matching_url}")
                             return True
 
-                break
+                # break
 
             if (time.time() - start_time) >= duration:
                 cv2.imwrite("frame.jpg", frame)
@@ -744,18 +520,18 @@ async def face_detection(username):
                 print(imgURL)
                 print("No match found. Frame uploaded to Cloudinary.")
 
-                TWILIO_ACCOUNT_SID = "AC8d12dac8399326b3699e757fec3a51ee"
-                TWILIO_AUTH_TOKEN = "2b2ab2d3972fe87a8b98e778efda33b3"
-                DESTINATION_PHONE_NUMBER = "+923337010789"
+                # TWILIO_ACCOUNT_SID = "AC8d12dac8399326b3699e757fec3a51ee"
+                # TWILIO_AUTH_TOKEN = "2b2ab2d3972fe87a8b98e778efda33b3"
+                # DESTINATION_PHONE_NUMBER = "+923337010789"
 
-                client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+                # client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
-                message = client.messages.create(
-                    from_="+13343779670",
-                    body=f"Alert: A transaction was made by an unknown person. Click the link to see the person trying to use your card {imgURL}.",
-                    to=DESTINATION_PHONE_NUMBER
-                )
-                print("text sent")
+                # message = client.messages.create(
+                #     from_="+13343779670",
+                #     body=f"Alert: An unknown person tried to access your account. Click the link to see the person trying to use your card {imgURL}.",
+                #     to=DESTINATION_PHONE_NUMBER
+                # )
+                # print("text sent")
 
                 break
 
@@ -770,71 +546,131 @@ async def face_detection(username):
     MONGODB_CONNECTION_STRING = os.getenv("mongodb://localhost:27017")
 
 
-@app.get("/face-recognition/{username}", response_class=JSONResponse)
-async def face_detection_route(request: Request, username: str):
-    isFaceRecognized = await face_detection(username)
+@app.get("/face-recognition/{cardNumber}", response_class=JSONResponse)
+async def face_detection_route(request: Request, cardNumber: str):
+    isFaceRecognized = await face_detection(cardNumber)
     return JSONResponse(content=isFaceRecognized)
+
 
 lock = threading.Lock()
 frame = None
 hands = mp.solutions.hands.Hands()
 
+active_tasks = {}
 
-def detect_stop_sign():
-    global frame
+cloudinary.config(
+    cloud_name="dlk8tzdu3",
+    api_key="994623638344852",
+    api_secret="YGFyNfSaEavUMv_3MV6xDbOLzsI",
+)
+
+
+async def gesture_recognition(websocket: WebSocket):
+    cap = cv2.VideoCapture(0)
+    palm_cascade = cv2.CascadeClassifier('lpalm.xml')
+    fist_cascade = cv2.CascadeClassifier('fist.xml')
+
+    fist_detected = False
+    recording_frames = []
+    consecutive_fist_count = 0
+    frame_count = 0
 
     try:
-        if frame is None:
-            return {"message": "Frame is not available."}
+        recording = False
+        last_frame = None
+        frame = None
 
-        with lock:
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            # ... (rest of the detection logic)
-            # Example: results = hands.process(rgb_frame)
-            # ...
+        while active_tasks.get(websocket, False):
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                break
 
-            # Display the processed frame using cv2.imshow()
-            cv2.imshow('Processed Frame', processed_frame)
-            cv2.waitKey(1)
+            print("frame count", frame_count)
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
+            palms = palm_cascade.detectMultiScale(
+                gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+            fist = fist_cascade.detectMultiScale(
+                gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
 
-# app = FastAPI()
+            x, y, w, h = 0, 0, 0, 0
 
+            for (x, y, w, h) in palms:
+                cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
 
-@app.get("/detect_stop_sign")
-async def detect_stop_sign_endpoint():
-    global frame
+            if len(fist) > 0:
+                cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 0, 255), 2)
+                consecutive_fist_count += 1
+                print("Fist detected")
+                if consecutive_fist_count == 6:
+                    fist_detected = True
+                    print("Fist recognized!")
+                    await websocket.send_text(json.dumps({"type": "fist_recognized", "data": {"recognized": True}}))
+                    print("before break")
+                    break
+            else:
+                consecutive_fist_count = 0
 
-    cap = cv2.VideoCapture(0)
-
-    if not cap.isOpened():
-        raise HTTPException(
-            status_code=500, detail="Could not open video capture.")
-
-    def read_frames():
-        global frame
-        while True:
-            ret, current_frame = cap.read()
-            if not ret:
-                raise HTTPException(
-                    status_code=500, detail="Error reading frame from video capture.")
-
-            with lock:
-                frame = current_frame
+            if active_tasks.get(websocket, False) and frame is not None and hasattr(frame, 'shape') and len(frame.shape) == 3:
+                recording_frames.append(frame)
+                print(len(recording_frames))
+                last_frame = frame
+                if not recording:
+                    print("Recording started")
+                    recording = True
+                cv2.imshow('Video Feed', frame)
                 cv2.waitKey(1)
 
-    frame_thread = threading.Thread(target=read_frames, daemon=True)
-    frame_thread.start()
+            frame_count += 1
+
+            await asyncio.sleep(0.1)
+
+        if fist_detected:
+            print("hi")
+        cap.release()
+        cv2.destroyAllWindows()
+
+        # print(len(recording_frames))
+        if recording_frames:
+            print("Recording stopped")
+            video_path = 'recorded_video.mkv'
+            out = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(
+                *'DIVX'), 30, (last_frame.shape[1], last_frame.shape[0]))
+            for frame in recording_frames:
+                out.write(frame)
+            out.release()
+
+            upload_result = cl_upload(
+                video_path, resource_type='video', folder='user_videos')
+            video_url = upload_result.get("secure_url", "")
+            print("sending video url: ", video_url)
+            await websocket.send_text(json.dumps({"type": "video_url", "data": {"url": video_url}}))
+        else:
+            print("here in else")
+            return {"fist_detected": fist_detected, "video_url in else": ""}
+
+    except WebSocketDisconnect:
+        cap.release()
+        cv2.destroyAllWindows()
+        active_tasks.pop(websocket, None)
+        return {"fist_detected": False, "video_url in exception": ""}
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
 
     try:
-        with lock:
-            result = detect_stop_sign()
-            return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+        while True:
+            data = await websocket.receive_text()
+            if data == "start_task":
+                active_tasks[websocket] = True
+                asyncio.create_task(gesture_recognition(websocket))
+            elif data == "stop_task":
+                active_tasks[websocket] = False
+    except WebSocketDisconnect:
+        active_tasks.pop(websocket, None)
 
 
 # def draw_bounding_boxes_cover(frame, faces):

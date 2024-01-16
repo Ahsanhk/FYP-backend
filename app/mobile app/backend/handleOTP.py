@@ -33,6 +33,8 @@ def generate_otp():
 
 
 def send_otp_via_sms(to, otp):
+    print(to)
+    print(otp)
     message = client.messages.create(
         from_="+13343779670",
         body=f"Your OTP is: {otp}",

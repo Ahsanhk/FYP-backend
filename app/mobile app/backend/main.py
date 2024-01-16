@@ -1,4 +1,9 @@
 # from fastapi_mail import FastMail, MessageSchema, ConnectionConfig
+from typing import Any
+from typing import Dict
+import hashlib
+import sched
+import bcrypt
 from bson import json_util
 from bson import ObjectId
 from typing import Optional
@@ -54,58 +59,12 @@ class userData(BaseModel):
     fullName: str
     mobileNumber: str
     password: str
-    pincode: str
     username: str
 
 
 class ProfilePicData(BaseModel):
     imageURL: str
     username: str
-
-
-@app.post("/signup/")
-async def register_user(user_data: userData):
-    try:
-        print("Storing user data in MongoDB:", user_data.dict())
-        result = collection_user.insert_one(user_data.dict())
-        user_id = str(result.inserted_id)
-
-        # creating a username instance in transaction dv
-        transactions_data = {
-            "username": user_data.username,
-            "transaction": []
-        }
-        collection_transactions.insert_one(transactions_data)
-
-        # creating a username instance in images db
-        images_data = {
-            "username": user_data.username,
-            "profilePicture": {},
-            "user_faces": [],
-        }
-        collection_images.insert_one(images_data)
-
-        # creating username instance in otp
-        otp_data = {
-            "username": user_data.username,
-            "otp": {}
-        }
-        collection_otp.insert_one(otp_data)
-
-        # creating a username instance in cards db
-        card_data = {
-            "username": user_data.username,
-            "cardNumber": {},
-            "bankName": {},
-            "updatedIssueDate": {},
-            "activeStatus": True,
-        }
-        collection_cards.insert_one(card_data)
-
-        return {"message": "User registered successfully", "user_id": user_id}
-    except Exception as e:
-        print(f"Exception register user: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 class UploadUserFaceRequest(BaseModel):
@@ -143,6 +102,16 @@ async def get_user_data(username: str):
         return user_data
     else:
         return {"message": "User not found"}
+
+
+@app.get("/check-username/{username}")
+async def check_username(username: str):
+    existing_user = collection_user.find_one({"username": username})
+
+    if existing_user:
+        return {"message": "Username already taken", "isTaken": True}
+    else:
+        return {"isTaken": False}
 
 
 class UploadUserFaceRequest(BaseModel):
@@ -183,16 +152,16 @@ async def get_user_images(username: str):
         return {"message": "User images not found"}
 
 
-@app.get("/get-user-transactions/{username}")
-async def get_user_transactions(username: str):
-    user_transactions_data = collection_transactions.find_one(
-        {"username": username})
-    # print(user_transactions_data)
-    if user_transactions_data:
-        user_transactions_data['_id'] = str(user_transactions_data['_id'])
-        return user_transactions_data
-    else:
-        return {"message": "User transactions not found"}
+@app.get("/get-user-transactions/{card_id}")
+async def get_user_transactions(card_id: str):
+    try:
+        transactions = list(collection_transactions.find({"card_id": card_id}))
+        for transaction in transactions:
+            transaction['_id'] = str(transaction['_id'])
+        return transactions
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Error fetching user transactions: {str(e)}")
 
 
 @app.get("/get-user-cards/{username}")
@@ -206,7 +175,36 @@ async def get_user_cards(username: str):
         raise HTTPException(status_code=404, detail="Username not found")
 
 
-# registers a user
+@app.get("/get-default-card/{user_id}")
+async def get_default_card(user_id: str):
+    try:
+        cards = collection_cards.find({"userId": user_id})
+
+        default_card = next(
+            (card for card in cards if card.get("default")), None)
+
+        if default_card:
+            # Convert ObjectId to string
+            card_id = str(default_card["_id"])
+
+            transactions = list(collection_transactions.find(
+                {"card_id": card_id}))
+            # transactions = list(transactions_cursor)
+            # print(transactions)
+
+            transactions = [
+                {**transaction, "_id": str(transaction["_id"])}
+                for transaction in transactions
+            ]
+            return {"transactions": transactions}
+        else:
+            raise HTTPException(
+                status_code=404, detail="Default card not found for the user")
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post('/register')
 async def handle_registration(user_data: UserRegistration):
     try:
@@ -222,32 +220,68 @@ async def handle_registration(user_data: UserRegistration):
     return JSONResponse(content=response_data)
 
 
-# authentication of the user
 @app.get("/authentication")
 async def validate_user_route(username: str, password: str):
-    # print(username, password)
     is_valid = validate_user(username, password)
-    # print("login", is_valid)
     if (is_valid):
         return True
     else:
         return False
 
 
+def delete_expired_otps(mobile_number):
+    collection_otp.delete_many({"mobileNumber": mobile_number})
+
+
 @app.post("/generate-otp")
 def generate_otp_endpoint(mobileNumber: otpData):
-    # global temporary_otp
     otp = generate_otp()
     print(otp)
+    hashed_otp = hashlib.sha256(otp.encode()).hexdigest()
 
     try:
-        print(mobileNumber)
-        send_otp_via_sms(mobileNumber.mobileNumber, otp)
+        otp_data = {
+            "mobileNumber": mobileNumber.mobileNumber,
+            "otp": hashed_otp,
+        }
 
-        return otp
+        result = collection_otp.insert_one(otp_data)
+
+        # send_otp_via_sms(mobileNumber.mobileNumber, otp)
+
+        return {"otpId": str(result.inserted_id)}
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Failed to send OTP: {str(e)}")
+
+
+class otpValData(BaseModel):
+    otpId: str
+    otp: str
+
+
+def hash_otp(otp):
+    return hashlib.sha256(otp.encode()).hexdigest()
+
+
+@app.post('/validate-otp')
+async def validate_otp(payload: otpValData):
+    try:
+        otp_id = ObjectId(payload.otpId)
+        otp_data = collection_otp.find_one({"_id": otp_id})
+
+        if otp_data:
+            hashed_input_otp = hash_otp(payload.otp)
+
+            if hashed_input_otp == otp_data["otp"]:
+                return JSONResponse(content={"isMatched": True})
+            else:
+                return JSONResponse(content={"isMatched": False})
+        else:
+            raise HTTPException(status_code=404, detail="OTP not found")
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Error validating OTP: {str(e)}")
 
 
 @app.post("/update-active-status/{cardNumber}")
@@ -461,17 +495,33 @@ async def store_card_info(card_info: CardData):
 
         balance = round(random.uniform(10000, 1000000), 2)
 
+        hashed_pin = None
+
+        try:
+            hashed_pin = bcrypt.hashpw(
+                card_info.pincode.encode("utf-8"), bcrypt.gensalt()
+            ).decode("utf-8")
+        except Exception as e:
+            print("Hashing Exception:", str(e))
+
         card_data = card_info.dict()
+
         card_data.update(
             {
+                "bankName": card_info.bankName,
+                "cardNumber": card_info.cardNumber,
+                "userId": card_info.userId,
+                "issuedate": card_info.issuedate,
                 "balance": balance,
                 "activeStatus": True,
                 "onlineStatus": True,
                 "intStatus": True,
                 "default": is_default,
-                "assignedFaces": []
+                "pincode": hashed_pin,
+                "assignedFaces": [],
             }
         )
+        print(card_data)
 
         collection_cards.insert_one(card_data)
 
