@@ -94,10 +94,16 @@ emotion_detection_task = None
 
 @app.get('/get-user/{cardNumber}')
 async def get_user(cardNumber: str):
-    card_exists = bool(collection_cards.find_one(
-        {"cardNumber": cardNumber}))
+    user_data = collection_cards.find_one({"cardNumber": cardNumber})
 
-    return {"exists": card_exists}
+    if user_data:
+        return {
+            "exists": True,
+            "userId": user_data["userId"],
+            "activeStatus": user_data.get("activeStatus", None)
+        }
+    else:
+        return {"exists": False}
 
 
 class CardDetails(BaseModel):
@@ -147,9 +153,6 @@ async def get_user_data(user_id: str):
         return {"message": "Invalid user_id format"}
 
 
-# global videoURL
-
-# stop_processing = False
 cloudinary_url = None
 
 
@@ -334,22 +337,21 @@ def detect_facial_landmarks(frame):
         nose_landmarks = shape[27:36]
         jaw_landmarks = shape[0:17]
 
-        mouth_covered = not np.all(mouth_landmarks)
-        nose_covered = not np.all(nose_landmarks)
-        jaw_covered = not np.all(jaw_landmarks)
-        print('mouth', mouth_covered)
-        print('nose', nose_covered)
-        print('jaw', jaw_covered)
+        mouth_covered = np.any(mouth_landmarks)
+        nose_covered = np.any(nose_landmarks)
+        jaw_covered = np.any(jaw_landmarks)
+        print('mouth', not mouth_covered)
+        print('nose', not nose_covered)
+        print('jaw', not jaw_covered)
 
-        if nose_covered or jaw_covered:
-            print('one of the mouse, nose or jaw is covered')
-            faces.append((x, y, w, h, True))
-            # return True
-        else:
-            # return False
+        if not (mouth_covered or nose_covered or jaw_covered):
+            print('none of the mouth, nose or jaw is covered')
             faces.append((x, y, w, h, False))
+        else:
+            print('one of the mouth, nose or jaw is covered')
+            faces.append((x, y, w, h, True))
 
-    return faces
+    # return faces
 
 
 @app.get("/multiple_face_detection")
@@ -382,6 +384,7 @@ async def check_multiple_faces_with_emotion():
             print("Error: Could not read frame.")
             break
 
+        # Emotion detection phase
         faces = detect_multiple_faces(frame)
 
         if len(faces) == 0:
@@ -411,6 +414,16 @@ async def check_multiple_faces_with_emotion():
 
             cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
+        if detect_facial_landmarks(frame):
+            print(
+                'One of the mouth, nose, or jaw is covered. Stopping further detection.')
+            return {"message": "One of the mouth, nose, or jaw is covered.", "shouldStop": True}
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
@@ -429,6 +442,23 @@ async def video_feed():
         return True
     else:
         return False
+
+
+# @app.get("/get_mobile_number/{card_number}")
+async def get_mobile_number(card_number: str):
+    cards_data = collection_cards.find_one({"cardNumber": card_number})
+    user_id = cards_data.get("userId") if cards_data else None
+
+    if user_id:
+        user_id_obj = ObjectId(user_id)
+
+        user_data = collection_user.find_one({"_id": user_id_obj})
+        mobile_number = user_data.get("mobileNumber") if user_data else None
+
+        return {"mobileNumber": mobile_number}
+
+    else:
+        return {"error": "User ID not found for the given card number."}
 
 
 def load_image_from_url(url):
@@ -520,16 +550,26 @@ async def face_detection(cardNumber):
                 print(imgURL)
                 print("No match found. Frame uploaded to Cloudinary.")
 
+                cards_data = db[collection_cards].find_one(
+                    {"cardNumber": cardNumber})
+                user_id = cards_data.get("userId") if cards_data else None
+
+                if user_id:
+                    user_data = db[COLLECTION_USERS].find_one(
+                        {"userId": user_id})
+                    destination_phone_number = user_data.get(
+                        "mobileNumber") if user_data else None
+
                 # TWILIO_ACCOUNT_SID = "AC8d12dac8399326b3699e757fec3a51ee"
                 # TWILIO_AUTH_TOKEN = "2b2ab2d3972fe87a8b98e778efda33b3"
-                # DESTINATION_PHONE_NUMBER = "+923337010789"
+                # destination_phone_number = await get_mobile_number(card_number)
 
                 # client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
                 # message = client.messages.create(
                 #     from_="+13343779670",
                 #     body=f"Alert: An unknown person tried to access your account. Click the link to see the person trying to use your card {imgURL}.",
-                #     to=DESTINATION_PHONE_NUMBER
+                #     to= destination_phone_number
                 # )
                 # print("text sent")
 
@@ -565,7 +605,7 @@ cloudinary.config(
 )
 
 
-async def gesture_recognition(websocket: WebSocket):
+async def gesture_recognition(websocket: WebSocket, card_id: str):
     cap = cv2.VideoCapture(0)
     palm_cascade = cv2.CascadeClassifier('lpalm.xml')
     fist_cascade = cv2.CascadeClassifier('fist.xml')
@@ -627,7 +667,30 @@ async def gesture_recognition(websocket: WebSocket):
             await asyncio.sleep(0.1)
 
         if fist_detected:
-            print("hi")
+            print("Recording stopped on detection")
+            video_path = 'recorded_video.mkv'
+            out = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(
+                *'DIVX'), 30, (last_frame.shape[1], last_frame.shape[0]))
+            for frame in recording_frames:
+                out.write(frame)
+            out.release()
+
+            upload_result = cl_upload(
+                video_path, resource_type='video', folder='user_videos')
+            video_url = upload_result.get("secure_url", "")
+            print("sending video url: ", video_url)
+            await websocket.send_text(json.dumps({"type": "video_url", "data": {"url": video_url}}))
+
+            new_transaction = {
+                "card_id": card_id,
+                "time": datetime.now(),
+                "amount": "N/A",
+                "videoURL": video_url,
+                "status": False
+            }
+
+        collection_transactions.insert_one(new_transaction)
+
         cap.release()
         cv2.destroyAllWindows()
 
@@ -664,9 +727,10 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_text()
-            if data == "start_task":
+            if data.startswith("start_task"):
+                card_id = data.split(" ")[1]
                 active_tasks[websocket] = True
-                asyncio.create_task(gesture_recognition(websocket))
+                asyncio.create_task(gesture_recognition(websocket, card_id))
             elif data == "stop_task":
                 active_tasks[websocket] = False
     except WebSocketDisconnect:
