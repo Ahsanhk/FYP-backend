@@ -445,10 +445,10 @@ async def check_multiple_faces_with_emotion():
 
             cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-        # if check_covered_face(frame):
-        #     # print(
-        #     #     'One of the mouth, nose, or jaw is covered. Stopping further detection.')
-        #     return {"message": "One of the mouth, nose, or jaw is covered.", "shouldStop": True}
+        if check_covered_face(frame):
+            # print(
+            #     'One of the mouth, nose, or jaw is covered. Stopping further detection.')
+            return {"message": "One of the mouth, nose, or jaw is covered.", "shouldStop": True}
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
