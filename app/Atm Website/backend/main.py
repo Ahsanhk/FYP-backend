@@ -51,13 +51,6 @@ import json
 from pymongo import MongoClient
 from pydantic import BaseModel
 
-from test3 import generate_frames
-from pincodeValidation import validate_pincode
-from usernameAuth import get_user_by_username
-from multipleFaceCheck import detect_faces
-from emotionDetection import detect_emotion
-from faceCoverCheck import isFaceCovered
-from faceRecognition import fetch_image_url_from_db, decode_image_from_url, generate_frames, recognize_face_in_frame
 
 app = FastAPI()
 
@@ -221,6 +214,44 @@ def detect_multiple_faces(frame):
     return faces
 
 
+def check_covered_face(frame):
+    height, width, _ = frame.shape
+
+    blob = cv2.dnn.blobFromImage(
+        frame, 0.00392, (416, 416), (0, 0, 0), True, crop=False)
+    net.setInput(blob)
+    outs = net.forward(output_layers)
+
+    confidences = []
+    boxes = []
+    faces = []
+
+    for out in outs:
+        for detection in out:
+            scores = detection[5:]
+            class_id = np.argmax(scores)
+            confidence = scores[class_id]
+            if confidence > 0.8 and class_id == 0:
+                center_x = int(detection[0] * width)
+                center_y = int(detection[1] * height)
+                w = int(detection[2] * width)
+                h = int(detection[3] * height)
+
+                x = int(center_x - w / 2)
+                y = int(center_y - h / 2)
+
+                boxes.append([x, y, w, h])
+                confidences.append(float(confidence))
+
+    indices = cv2.dnn.NMSBoxes(boxes, confidences, 0.5, 0.4)
+    for i in indices:
+        i = i.item()
+        x, y, w, h = boxes[i]
+        faces.append((x, y, w, h))
+
+    return faces
+
+
 def draw_bounding_boxes(frame, faces):
     for (x, y, w, h) in faces:
         cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
@@ -345,10 +376,10 @@ def detect_facial_landmarks(frame):
         print('jaw', not jaw_covered)
 
         if not (mouth_covered or nose_covered or jaw_covered):
-            print('none of the mouth, nose or jaw is covered')
+            # print('none of the mouth, nose or jaw is covered')
             faces.append((x, y, w, h, False))
         else:
-            print('one of the mouth, nose or jaw is covered')
+            # print('one of the mouth, nose or jaw is covered')
             faces.append((x, y, w, h, True))
 
     # return faces
@@ -414,10 +445,10 @@ async def check_multiple_faces_with_emotion():
 
             cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-        if detect_facial_landmarks(frame):
-            print(
-                'One of the mouth, nose, or jaw is covered. Stopping further detection.')
-            return {"message": "One of the mouth, nose, or jaw is covered.", "shouldStop": True}
+        # if check_covered_face(frame):
+        #     # print(
+        #     #     'One of the mouth, nose, or jaw is covered. Stopping further detection.')
+        #     return {"message": "One of the mouth, nose, or jaw is covered.", "shouldStop": True}
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
@@ -444,7 +475,6 @@ async def video_feed():
         return False
 
 
-# @app.get("/get_mobile_number/{card_number}")
 async def get_mobile_number(card_number: str):
     cards_data = collection_cards.find_one({"cardNumber": card_number})
     user_id = cards_data.get("userId") if cards_data else None
@@ -455,7 +485,7 @@ async def get_mobile_number(card_number: str):
         user_data = collection_user.find_one({"_id": user_id_obj})
         mobile_number = user_data.get("mobileNumber") if user_data else None
 
-        return {"mobileNumber": mobile_number}
+        return mobile_number
 
     else:
         return {"error": "User ID not found for the given card number."}
@@ -475,8 +505,6 @@ async def face_detection(cardNumber):
         api_key="994623638344852",
         api_secret="YGFyNfSaEavUMv_3MV6xDbOLzsI",
     )
-
-    # user_data = collection_images.find_one({"username": cardNumber})
 
     card_instance = collection_cards.find_one({"cardNumber": cardNumber})
 
@@ -508,14 +536,12 @@ async def face_detection(cardNumber):
         for reference_image_url in user_data:
 
             reference_image = load_image_from_url(reference_image_url)
-            print(reference_image)
 
             if reference_image is not None:
                 reference_encoding = face_recognition.face_encodings(reference_image)[
                     0]
                 reference_encodings.append(
                     (reference_encoding, reference_image_url))
-                print("here")
 
         duration = 2
         start_time = time.time()
@@ -547,30 +573,22 @@ async def face_detection(cardNumber):
                 upload_result = cloudinary.uploader.upload(
                     "frame.jpg", folder="alert_images")
                 imgURL = upload_result.get('url')
-                print(imgURL)
-                print("No match found. Frame uploaded to Cloudinary.")
+                # print(imgURL)
+                # print("No match found. Frame uploaded to Cloudinary.")
 
-                cards_data = db[collection_cards].find_one(
-                    {"cardNumber": cardNumber})
-                user_id = cards_data.get("userId") if cards_data else None
+                destination_phone_number = await get_mobile_number(cardNumber)
+                # print(destination_phone_number)
 
-                if user_id:
-                    user_data = db[COLLECTION_USERS].find_one(
-                        {"userId": user_id})
-                    destination_phone_number = user_data.get(
-                        "mobileNumber") if user_data else None
+                TWILIO_ACCOUNT_SID = "AC10878b2163268a12a02b190255fc9e38"
+                TWILIO_AUTH_TOKEN = "aacedc854bc74414247e08d4d404582f"
+                # destination_phone_number = '+923061668634'
+                client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
-                # TWILIO_ACCOUNT_SID = "AC8d12dac8399326b3699e757fec3a51ee"
-                # TWILIO_AUTH_TOKEN = "2b2ab2d3972fe87a8b98e778efda33b3"
-                # destination_phone_number = await get_mobile_number(card_number)
-
-                # client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-
-                # message = client.messages.create(
-                #     from_="+13343779670",
-                #     body=f"Alert: An unknown person tried to access your account. Click the link to see the person trying to use your card {imgURL}.",
-                #     to= destination_phone_number
-                # )
+                message = client.messages.create(
+                    from_="+19386661883",
+                    body=f"Alert: An unknown person tried to access your account. Click the link to see the person trying to use your card {imgURL}.",
+                    to=destination_phone_number
+                )
                 # print("text sent")
 
                 break
@@ -579,11 +597,6 @@ async def face_detection(cardNumber):
     cv2.destroyAllWindows()
     print("No match found.")
     return False
-
-    TWILIO_ACCOUNT_SID = os.getenv("AC8d12dac8399326b3699e757fec3a51ee")
-    TWILIO_AUTH_TOKEN = os.getenv("2b2ab2d3972fe87a8b98e778efda33b3")
-    # TWILIO_PHONE_NUMBER = os.getenv("+19386661883")
-    MONGODB_CONNECTION_STRING = os.getenv("mongodb://localhost:27017")
 
 
 @app.get("/face-recognition/{cardNumber}", response_class=JSONResponse)
@@ -614,6 +627,7 @@ async def gesture_recognition(websocket: WebSocket, card_id: str):
     recording_frames = []
     consecutive_fist_count = 0
     frame_count = 0
+    new_transaction = {}
 
     try:
         recording = False
@@ -624,8 +638,6 @@ async def gesture_recognition(websocket: WebSocket, card_id: str):
             ret, frame = cap.read()
             if not ret or frame is None:
                 break
-
-            print("frame count", frame_count)
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
@@ -642,19 +654,16 @@ async def gesture_recognition(websocket: WebSocket, card_id: str):
             if len(fist) > 0:
                 cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 0, 255), 2)
                 consecutive_fist_count += 1
-                print("Fist detected")
                 if consecutive_fist_count == 6:
                     fist_detected = True
-                    print("Fist recognized!")
                     await websocket.send_text(json.dumps({"type": "fist_recognized", "data": {"recognized": True}}))
-                    print("before break")
+                    # print("before break")
                     break
             else:
                 consecutive_fist_count = 0
 
             if active_tasks.get(websocket, False) and frame is not None and hasattr(frame, 'shape') and len(frame.shape) == 3:
                 recording_frames.append(frame)
-                print(len(recording_frames))
                 last_frame = frame
                 if not recording:
                     print("Recording started")
@@ -710,7 +719,6 @@ async def gesture_recognition(websocket: WebSocket, card_id: str):
             print("sending video url: ", video_url)
             await websocket.send_text(json.dumps({"type": "video_url", "data": {"url": video_url}}))
         else:
-            print("here in else")
             return {"fist_detected": fist_detected, "video_url in else": ""}
 
     except WebSocketDisconnect:
@@ -735,41 +743,3 @@ async def websocket_endpoint(websocket: WebSocket):
                 active_tasks[websocket] = False
     except WebSocketDisconnect:
         active_tasks.pop(websocket, None)
-
-
-# def draw_bounding_boxes_cover(frame, faces):
-#     for face in faces:
-#         x, y, w, h, covered = face
-#         # Green if not covered, red if covered
-#         color = (0, 255, 0) if not covered else (0, 0, 255)
-#         cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
-
-#         if covered:
-#             face_region = frame[y:y+h, x:x+w]
-
-#             # Detect facial landmarks within the bounding box
-#             face_rect = dlib.rectangle(
-#                 left=x, top=y, right=x + w, bottom=y + h)
-#             shape = predictor(frame, face_rect)
-#             shape = face_utils.shape_to_np(shape)
-
-#             # Define the eye landmarks
-#             left_eye = shape[36:42]
-#             right_eye = shape[42:48]
-
-#             # Check if the eyes are detected and draw rectangles if covered
-#             if not np.all(left_eye):
-#                 left_eye_x = np.min(left_eye[:, 0])
-#                 left_eye_y = np.min(left_eye[:, 1])
-#                 left_eye_w = np.max(left_eye[:, 0]) - left_eye_x
-#                 left_eye_h = np.max(left_eye[:, 1]) - left_eye_y
-#                 cv2.rectangle(face_region, (left_eye_x, left_eye_y), (left_eye_x +
-#                               left_eye_w, left_eye_y + left_eye_h), (0, 0, 255), 2)
-
-#             if not np.all(right_eye):
-#                 right_eye_x = np.min(right_eye[:, 0])
-#                 right_eye_y = np.min(right_eye[:, 1])
-#                 right_eye_w = np.max(right_eye[:, 0]) - right_eye_x
-#                 right_eye_h = np.max(right_eye[:, 1]) - right_eye_y
-#                 cv2.rectangle(face_region, (right_eye_x, right_eye_y), (right_eye_x +
-#                               right_eye_w, right_eye_y + right_eye_h), (0, 0, 255), 2)
